@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const diagnosisRoutes = require('./Routes/diagnosis'); // ✅ Add this
 const userRoutes = require('./Routes/users');
+const caseQueriesRoutes = require('./Routes/caseQueries');
 
 const app = express();
 
@@ -18,6 +19,8 @@ app.use(express.urlencoded({ extended: true }));
 // Routes
 app.use('/api/diagnosis', diagnosisRoutes); // ✅ Uncomment and add this
 app.use('/api/users', userRoutes);
+app.use('/api/case-queries', caseQueriesRoutes);
+app.use('/api/random-cases', require('./Routes/randomCases'));
 
 // Add this line to serve uploaded files
 app.use('/uploads', express.static('uploads'));
