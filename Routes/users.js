@@ -162,33 +162,140 @@ router.get('/:uid', async (req, res) => {
   }
 });
 
-// PUT /api/users/:uid - Update user profile
+// Updated backend route - users.js (add this PUT endpoint)
+// PUT /api/users/:uid - Update user profile with role details
 router.put('/:uid', async (req, res) => {
   try {
     const { uid } = req.params;
-    const { display_name, photo_url, phone_number } = req.body;
+    let { 
+      display_name, 
+      photo_url, 
+      phone_number,
+      role,
+      specialization,
+      experience_years,
+      medical_license,
+      age,
+      gender,
+      medical_conditions,
+      reason_for_interest,
+      learning_goals,
+      role_completed 
+    } = req.body;
+
+    // Fix for empty string being passed to integer fields
+    if (experience_years === '') experience_years = null;
+    if (age === '') age = null;
     
     console.log('🔄 Updating user:', uid);
-    console.log('📋 Update data:', { display_name, photo_url, phone_number });
-    
+    console.log('📋 Update data:', { role, specialization, age, gender });
+
+    // First check if columns exist, if not, alter table
+    const checkColumnsQuery = `
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name='users'
+    `;
+    const columnsResult = await pool.query(checkColumnsQuery);
+    const existingColumns = columnsResult.rows.map(row => row.column_name);
+
+    // Add missing columns if they don't exist
+    const columnsToAdd = [
+      { name: 'role', type: 'VARCHAR(50)' },
+      { name: 'specialization', type: 'VARCHAR(100)' },
+      { name: 'experience_years', type: 'INTEGER' },
+      { name: 'medical_license', type: 'VARCHAR(100)' },
+      { name: 'age', type: 'INTEGER' },
+      { name: 'gender', type: 'VARCHAR(20)' },
+      { name: 'medical_conditions', type: 'TEXT' },
+      { name: 'reason_for_interest', type: 'VARCHAR(100)' },
+      { name: 'learning_goals', type: 'TEXT' },
+      { name: 'role_completed', type: 'BOOLEAN DEFAULT FALSE' }
+    ];
+
+    for (const column of columnsToAdd) {
+      if (!existingColumns.includes(column.name)) {
+        console.log(`➕ Adding column: ${column.name}`);
+        await pool.query(`ALTER TABLE users ADD COLUMN ${column.name} ${column.type}`);
+      }
+    }
+
+    // Build dynamic update query
+    const updateFields = [];
+    const values = [];
+    let paramIndex = 1;
+
+    if (display_name !== undefined) {
+      updateFields.push(`display_name = $${paramIndex++}`);
+      values.push(display_name);
+    }
+    if (photo_url !== undefined) {
+      updateFields.push(`photo_url = $${paramIndex++}`);
+      values.push(photo_url);
+    }
+    if (phone_number !== undefined) {
+      updateFields.push(`phone_number = $${paramIndex++}`);
+      values.push(phone_number);
+    }
+    if (role !== undefined) {
+      updateFields.push(`role = $${paramIndex++}`);
+      values.push(role);
+    }
+    if (specialization !== undefined) {
+      updateFields.push(`specialization = $${paramIndex++}`);
+      values.push(specialization);
+    }
+    if (experience_years !== undefined) {
+      updateFields.push(`experience_years = $${paramIndex++}`);
+      values.push(experience_years);
+    }
+    if (medical_license !== undefined) {
+      updateFields.push(`medical_license = $${paramIndex++}`);
+      values.push(medical_license);
+    }
+    if (age !== undefined) {
+      updateFields.push(`age = $${paramIndex++}`);
+      values.push(age);
+    }
+    if (gender !== undefined) {
+      updateFields.push(`gender = $${paramIndex++}`);
+      values.push(gender);
+    }
+    if (medical_conditions !== undefined) {
+      updateFields.push(`medical_conditions = $${paramIndex++}`);
+      values.push(medical_conditions);
+    }
+    if (reason_for_interest !== undefined) {
+      updateFields.push(`reason_for_interest = $${paramIndex++}`);
+      values.push(reason_for_interest);
+    }
+    if (learning_goals !== undefined) {
+      updateFields.push(`learning_goals = $${paramIndex++}`);
+      values.push(learning_goals);
+    }
+    if (role_completed !== undefined) {
+      updateFields.push(`role_completed = $${paramIndex++}`);
+      values.push(role_completed);
+    }
+
+    // Always update the updated_at timestamp
+    updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
+
+    // Add uid as the last parameter
+    values.push(uid);
+
     const query = `
       UPDATE users 
-      SET 
-        display_name = $1, 
-        photo_url = $2, 
-        phone_number = $3, 
-        updated_at = CURRENT_TIMESTAMP
-      WHERE uid = $4
+      SET ${updateFields.join(', ')}
+      WHERE uid = $${paramIndex}
       RETURNING *
     `;
-    
-    const result = await pool.query(query, [
-      display_name,
-      photo_url,
-      phone_number,
-      uid
-    ]);
-    
+
+    console.log('📝 Update query:', query);
+    console.log('📦 Values:', values);
+
+    const result = await pool.query(query, values);
+
     if (result.rows.length === 0) {
       console.log('❌ User not found for update:', uid);
       return res.status(404).json({
@@ -196,21 +303,25 @@ router.put('/:uid', async (req, res) => {
         error: 'User not found'
       });
     }
-    
+
     console.log('✅ User updated successfully');
-    
+    console.log('📊 Updated user data:', result.rows[0]);
+
     res.status(200).json({
       success: true,
       user: result.rows[0]
     });
   } catch (error) {
     console.error('❌ Error updating user:', error);
+    console.error('Error details:', error.message);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error: 'Internal server error',
+      details: error.message
     });
   }
 });
+
 
 // GET /api/users - Get all users (for debugging)
 router.get('/', async (req, res) => {
