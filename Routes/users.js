@@ -6,12 +6,12 @@ const pool = require('../db');
 router.post('/sync', async (req, res) => {
   try {
     console.log('📨 Received user sync request:', req.body);
-    
+
     // Extract data from request body
     const { uid, email, display_name, photo_url, phone_number } = req.body;
-    
+
     console.log('📋 Parsed data:', { uid, email, display_name, photo_url, phone_number });
-    
+
     // Validation
     if (!uid) {
       console.error('❌ Validation failed: uid is required');
@@ -30,7 +30,7 @@ router.post('/sync', async (req, res) => {
     }
 
     console.log('🔍 Checking if user exists:', uid);
-    
+
     // Check if user exists (by Firebase UID)
     const checkQuery = 'SELECT * FROM users WHERE uid = $1';
     const checkResult = await pool.query(checkQuery, [uid]);
@@ -38,20 +38,20 @@ router.post('/sync', async (req, res) => {
     if (checkResult.rows.length > 0) {
       // Update existing user
       console.log('✅ User found, updating...');
-      
+
       const updateQuery = `
         UPDATE users 
         SET 
           email = $1, 
-          display_name = COALESCE($2, display_name), 
-          photo_url = COALESCE($3, photo_url), 
-          phone_number = COALESCE($4, phone_number), 
+          display_name = COALESCE(display_name, $2), 
+          photo_url = COALESCE(photo_url, $3), 
+          phone_number = COALESCE(phone_number, $4), 
           updated_at = CURRENT_TIMESTAMP,
           last_login = CURRENT_TIMESTAMP
         WHERE uid = $5
         RETURNING *
       `;
-      
+
       console.log('🔄 Executing update query...');
       const updateResult = await pool.query(updateQuery, [
         email,
@@ -71,13 +71,13 @@ router.post('/sync', async (req, res) => {
     } else {
       // Create new user
       console.log('🆕 User not found, creating new user...');
-      
+
       const insertQuery = `
         INSERT INTO users (uid, email, display_name, photo_url, phone_number)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING *
       `;
-      
+
       console.log('✨ Executing insert query...');
       const insertResult = await pool.query(insertQuery, [
         uid,
@@ -104,7 +104,7 @@ router.post('/sync', async (req, res) => {
     console.error('Error Detail:', error.detail);
     console.error('Error Hint:', error.hint);
     console.error('Request Body:', req.body);
-    
+
     // Check for specific errors
     if (error.code === '23505') {
       console.error('🔴 UNIQUE CONSTRAINT VIOLATION');
@@ -117,9 +117,9 @@ router.post('/sync', async (req, res) => {
       console.error('   Trying to access a column that does not exist in the table');
       console.error('   Common issue: Trying to use "age" column which might not exist');
     }
-    
+
     console.error('=========== ERROR END ===========');
-    
+
     res.status(500).json({
       success: false,
       error: 'Internal server error',
@@ -133,12 +133,12 @@ router.post('/sync', async (req, res) => {
 router.get('/:uid', async (req, res) => {
   try {
     const { uid } = req.params;
-    
+
     console.log('🔍 Fetching user:', uid);
-    
+
     const query = 'SELECT * FROM users WHERE uid = $1';
     const result = await pool.query(query, [uid]);
-    
+
     if (result.rows.length === 0) {
       console.log('❌ User not found:', uid);
       return res.status(404).json({
@@ -146,9 +146,9 @@ router.get('/:uid', async (req, res) => {
         error: 'User not found'
       });
     }
-    
+
     console.log('✅ User found:', result.rows[0].email);
-    
+
     res.status(200).json({
       success: true,
       user: result.rows[0]
@@ -167,9 +167,9 @@ router.get('/:uid', async (req, res) => {
 router.put('/:uid', async (req, res) => {
   try {
     const { uid } = req.params;
-    let { 
-      display_name, 
-      photo_url, 
+    let {
+      display_name,
+      photo_url,
       phone_number,
       role,
       specialization,
@@ -180,13 +180,13 @@ router.put('/:uid', async (req, res) => {
       medical_conditions,
       reason_for_interest,
       learning_goals,
-      role_completed 
+      role_completed
     } = req.body;
 
     // Fix for empty string being passed to integer fields
     if (experience_years === '') experience_years = null;
     if (age === '') age = null;
-    
+
     console.log('🔄 Updating user:', uid);
     console.log('📋 Update data:', { role, specialization, age, gender });
 
@@ -327,12 +327,12 @@ router.put('/:uid', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     console.log('📋 Fetching all users...');
-    
+
     const query = 'SELECT id, uid, internal_uuid, email, display_name, created_at FROM users ORDER BY created_at DESC';
     const result = await pool.query(query);
-    
+
     console.log('✅ Found', result.rows.length, 'users');
-    
+
     res.status(200).json({
       success: true,
       users: result.rows,
