@@ -2,11 +2,12 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { verifyToken } = require('../middleware/authMiddleware');
 
 // ============================================
 // GET /api/case-queries/case/:caseId - Get all queries for a specific case
 // ============================================
-router.get('/case/:caseId', async (req, res) => {
+router.get('/case/:caseId', verifyToken, async (req, res) => {
     try {
         const { caseId } = req.params;
         const { limit = 50, offset = 0 } = req.query;
@@ -15,7 +16,7 @@ router.get('/case/:caseId', async (req, res) => {
 
         // First verify the case exists
         const caseCheck = await pool.query(
-            'SELECT id, case_title FROM diagnosis_cases WHERE id = $1',
+            'SELECT dc.id, dc.case_title, u.uid as user_firebase_uid FROM diagnosis_cases dc JOIN users u ON dc.user_internal_uuid = u.internal_uuid WHERE dc.id = $1',
             [caseId]
         );
 
@@ -24,6 +25,10 @@ router.get('/case/:caseId', async (req, res) => {
                 success: false,
                 error: 'Case not found'
             });
+        }
+        
+        if (caseCheck.rows[0].user_firebase_uid !== req.user.uid) {
+            return res.status(403).json({ success: false, error: 'Forbidden: Access denied' });
         }
 
         // Get total count
@@ -87,7 +92,7 @@ router.get('/case/:caseId', async (req, res) => {
 // ============================================
 // POST /api/case-queries - Create a new query for a case
 // ============================================
-router.post('/', async (req, res) => {
+router.post('/', verifyToken, async (req, res) => {
     const client = await pool.connect();
 
     try {
@@ -99,6 +104,10 @@ router.post('/', async (req, res) => {
             response_time_ms,
             tokens_used
         } = req.body;
+
+        if (user_firebase_uid !== req.user.uid) {
+            return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+        }
 
         console.log('📝 Creating new case query:', { case_id, user_firebase_uid });
 
@@ -203,7 +212,7 @@ router.post('/', async (req, res) => {
 // ============================================
 // GET /api/case-queries/:queryId - Get a specific query
 // ============================================
-router.get('/:queryId', async (req, res) => {
+router.get('/:queryId', verifyToken, async (req, res) => {
     try {
         const { queryId } = req.params;
 
@@ -213,6 +222,7 @@ router.get('/:queryId', async (req, res) => {
         u.display_name as user_name,
         u.email as user_email,
         u.photo_url as user_photo_url,
+        u.uid as user_firebase_uid,
         dc.case_title,
         dc.symptoms,
         dc.patient_name
@@ -229,6 +239,10 @@ router.get('/:queryId', async (req, res) => {
                 success: false,
                 error: 'Query not found'
             });
+        }
+        
+        if (result.rows[0].user_firebase_uid !== req.user.uid) {
+            return res.status(403).json({ success: false, error: 'Forbidden: Access denied' });
         }
 
         res.status(200).json({
@@ -248,12 +262,16 @@ router.get('/:queryId', async (req, res) => {
 // ============================================
 // GET /api/case-queries/user/:uid - Get all queries for a user
 // ============================================
-router.get('/user/:uid', async (req, res) => {
+router.get('/user/:uid', verifyToken, async (req, res) => {
     try {
         const { uid } = req.params;
         const { limit = 20, offset = 0 } = req.query;
 
         console.log('📋 Fetching all queries for user:', uid);
+
+        if (uid !== req.user.uid) {
+            return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+        }
 
         // Get user internal UUID
         const userQuery = 'SELECT internal_uuid FROM users WHERE uid = $1';
@@ -314,7 +332,7 @@ router.get('/user/:uid', async (req, res) => {
 // ============================================
 // DELETE /api/case-queries/:queryId - Delete a query
 // ============================================
-router.delete('/:queryId', async (req, res) => {
+router.delete('/:queryId', verifyToken, async (req, res) => {
     const client = await pool.connect();
 
     try {
@@ -322,16 +340,26 @@ router.delete('/:queryId', async (req, res) => {
 
         await client.query('BEGIN');
 
+        const checkQuery = `
+          SELECT q.*, u.uid as user_firebase_uid 
+          FROM case_queries q 
+          JOIN users u ON q.user_internal_uuid = u.internal_uuid 
+          WHERE q.id = $1
+        `;
+        const checkResult = await client.query(checkQuery, [queryId]);
+
+        if (checkResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, error: 'Query not found' });
+        }
+        
+        if (checkResult.rows[0].user_firebase_uid !== req.user.uid) {
+            await client.query('ROLLBACK');
+            return res.status(403).json({ success: false, error: 'Forbidden: Access denied' });
+        }
+
         const deleteQuery = 'DELETE FROM case_queries WHERE id = $1 RETURNING *';
         const result = await client.query(deleteQuery, [queryId]);
-
-        if (result.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({
-                success: false,
-                error: 'Query not found'
-            });
-        }
 
         await client.query('COMMIT');
 

@@ -2,11 +2,12 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { verifyToken } = require('../middleware/authMiddleware');
 
 // ============================================
 // GET /api/random-cases - Get random cases
 // ============================================
-router.get('/', async (req, res) => {
+router.get('/', verifyToken, async (req, res) => {
     try {
         const { limit = 3 } = req.query;
 
@@ -45,7 +46,7 @@ router.get('/', async (req, res) => {
 // ============================================
 // GET /api/random-cases/:id - Get single case
 // ============================================
-router.get('/:id', async (req, res) => {
+router.get('/:id', verifyToken, async (req, res) => {
     try {
         const { id } = req.params;
 
@@ -79,7 +80,7 @@ router.get('/:id', async (req, res) => {
 // ============================================
 // POST /api/random-cases/attempt - Save case attempt
 // ============================================
-router.post('/attempt', async (req, res) => {
+router.post('/attempt', verifyToken, async (req, res) => {
     const client = await pool.connect();
 
     try {
@@ -91,6 +92,10 @@ router.post('/attempt', async (req, res) => {
             total_questions,
             time_spent
         } = req.body;
+
+        if (user_firebase_uid !== req.user.uid) {
+            return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+        }
 
         console.log('📝 Saving case attempt:', { case_id, user_firebase_uid, score });
 
@@ -170,9 +175,13 @@ router.post('/attempt', async (req, res) => {
 // ============================================
 // GET /api/random-cases/user/:userUuid/attempts - Get user attempts
 // ============================================
-router.get('/user/:userUuid/attempts', async (req, res) => {
+router.get('/user/:userUuid/attempts', verifyToken, async (req, res) => {
     try {
         const { userUuid } = req.params; // Expecting Firebase UID
+
+        if (userUuid !== req.user.uid) {
+            return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+        }
 
         // Get user internal UUID
         const userQuery = 'SELECT internal_uuid FROM users WHERE uid = $1';

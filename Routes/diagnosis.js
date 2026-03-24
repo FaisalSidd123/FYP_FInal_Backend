@@ -4,6 +4,7 @@ const pool = require('../db');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { verifyToken } = require('../middleware/authMiddleware');
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -43,7 +44,7 @@ const upload = multer({
 // ============================================
 // POST /api/diagnosis - Create new diagnosis case
 // ============================================
-router.post('/', upload.single('file'), async (req, res) => {
+router.post('/', verifyToken, upload.single('file'), async (req, res) => {
   const client = await pool.connect();
   
   try {
@@ -70,6 +71,11 @@ router.post('/', upload.single('file'), async (req, res) => {
         success: false,
         error: 'User Firebase UID is required'
       });
+    }
+
+    if (user_firebase_uid !== req.user.uid) {
+      console.error('❌ Security alert: UID mismatch in POST /diagnosis');
+      return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
     }
 
     if (!symptoms || symptoms.trim() === '') {
@@ -248,9 +254,14 @@ router.post('/', upload.single('file'), async (req, res) => {
 // ============================================
 // GET /api/diagnosis/user/:uid - Get all cases for a user
 // ============================================
-router.get('/user/:uid', async (req, res) => {
+router.get('/user/:uid', verifyToken, async (req, res) => {
   try {
     const { uid } = req.params;
+    
+    if (uid !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+    }
+    
     const { 
       limit = 20, 
       offset = 0,
@@ -394,7 +405,7 @@ router.get('/user/:uid', async (req, res) => {
 // ============================================
 // GET /api/diagnosis/case/:id - Get single case by ID
 // ============================================
-router.get('/case/:id', async (req, res) => {
+router.get('/case/:id', verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     console.log('🔍 Fetching case:', id);
@@ -420,6 +431,10 @@ router.get('/case/:id', async (req, res) => {
       });
     }
 
+    if (result.rows[0].user_firebase_uid !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: Access denied' });
+    }
+
     console.log('✅ Case found:', result.rows[0].case_title);
 
     res.status(200).json({
@@ -439,7 +454,7 @@ router.get('/case/:id', async (req, res) => {
 // ============================================
 // DELETE /api/diagnosis/case/:id - Delete a case
 // ============================================
-router.delete('/case/:id', async (req, res) => {
+router.delete('/case/:id', verifyToken, async (req, res) => {
   const client = await pool.connect();
   
   try {
@@ -449,7 +464,12 @@ router.delete('/case/:id', async (req, res) => {
     await client.query('BEGIN');
 
     // First, get the case to verify ownership if needed
-    const checkQuery = 'SELECT * FROM diagnosis_cases WHERE id = $1';
+    const checkQuery = `
+      SELECT dc.*, u.uid as user_firebase_uid 
+      FROM diagnosis_cases dc 
+      JOIN users u ON dc.user_internal_uuid = u.internal_uuid 
+      WHERE dc.id = $1
+    `;
     const checkResult = await client.query(checkQuery, [id]);
 
     if (checkResult.rows.length === 0) {
@@ -458,6 +478,11 @@ router.delete('/case/:id', async (req, res) => {
         success: false,
         error: 'Case not found'
       });
+    }
+
+    if (checkResult.rows[0].user_firebase_uid !== req.user.uid) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, error: 'Forbidden: Access denied' });
     }
 
     // Delete the case

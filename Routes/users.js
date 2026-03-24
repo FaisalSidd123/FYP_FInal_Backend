@@ -2,8 +2,10 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 
+const { verifyToken } = require('../middleware/authMiddleware');
+
 // POST /api/users/sync - Sync user with database
-router.post('/sync', async (req, res) => {
+router.post('/sync', verifyToken, async (req, res) => {
   try {
     console.log('📨 Received user sync request:', req.body);
 
@@ -19,6 +21,12 @@ router.post('/sync', async (req, res) => {
         success: false,
         error: 'User UID is required'
       });
+    }
+
+    // Security check
+    if (uid !== req.user.uid) {
+      console.error('❌ Security alert: UID mismatch in sync request');
+      return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
     }
 
     if (!email) {
@@ -130,9 +138,13 @@ router.post('/sync', async (req, res) => {
 });
 
 // GET /api/users/:uid - Get user by Firebase UID
-router.get('/:uid', async (req, res) => {
+router.get('/:uid', verifyToken, async (req, res) => {
   try {
     const { uid } = req.params;
+
+    if (uid !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+    }
 
     console.log('🔍 Fetching user:', uid);
 
@@ -164,9 +176,13 @@ router.get('/:uid', async (req, res) => {
 
 // Updated backend route - users.js (add this PUT endpoint)
 // PUT /api/users/:uid - Update user profile with role details
-router.put('/:uid', async (req, res) => {
+router.put('/:uid', verifyToken, async (req, res) => {
   try {
     const { uid } = req.params;
+
+    if (uid !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+    }
     let {
       display_name,
       photo_url,
@@ -324,7 +340,7 @@ router.put('/:uid', async (req, res) => {
 
 
 // GET /api/users - Get all users (for debugging)
-router.get('/', async (req, res) => {
+router.get('/', verifyToken, async (req, res) => {
   try {
     console.log('📋 Fetching all users...');
 

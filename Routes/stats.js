@@ -2,13 +2,19 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { verifyToken } = require('../middleware/authMiddleware');
 
 // ============================================
 // GET /api/stats/dashboard/:uid - Get dashboard statistics for a user
 // ============================================
-router.get('/dashboard/:uid', async (req, res) => {
+router.get('/dashboard/:uid', verifyToken, async (req, res) => {
     try {
         const { uid } = req.params;
+        
+        if (uid !== req.user.uid) {
+            return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+        }
+        
         console.log('📊 Fetching dashboard stats for user:', uid);
 
         // Get user internal UUID
