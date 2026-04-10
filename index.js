@@ -19,6 +19,14 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Health Check Root Route
+app.get('/', (req, res) => {
+  res.status(200).json({ 
+    status: 'success', 
+    message: 'HealthSimulator API is Running successfully!' 
+  });
+});
+
 // Routes
 app.use('/api/diagnosis', diagnosisRoutes); // ✅ Uncomment and add this
 app.use('/api/users', userRoutes);
