@@ -10,11 +10,12 @@ const connectionConfig = process.env.DATABASE_URL
       connectionTimeoutMillis: 10000,
     }
   : {
-      user: process.env.DB_USER || 'postgres',
-      host: process.env.DB_HOST || 'db.eehqzrypyapilzqmrjgj.supabase.co',
+      // Changed to the reliable IPv4 pooler settings to prevent ENOTFOUND / IPv6 network blocks locally
+      user: process.env.DB_USER || 'postgres.eehqzrypyapilzqmrjgj',
+      host: process.env.DB_HOST || 'aws-1-ap-southeast-1.pooler.supabase.com',
       database: process.env.DB_NAME || 'postgres',
       password: process.env.DB_PASSWORD || 'UqJ9ZyyY-b%Zk83',
-      port: process.env.DB_PORT || 5432,
+      port: process.env.DB_PORT || 6543,
       ssl: {
         rejectUnauthorized: false
       },
