@@ -2,26 +2,12 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const { verifyToken } = require('../middleware/authMiddleware');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../cloudinary');
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = 'uploads/diagnosis/';
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'diagnosis-' + uniqueSuffix + ext);
-  }
-});
+// Configure multer for MEMORY storage (buffer) instead of disk
+// The buffer will be uploaded to Cloudinary
+const storage = multer.memoryStorage();
 
 // File filter for images only
 const fileFilter = (req, file, cb) => {
@@ -50,7 +36,7 @@ router.post('/', verifyToken, upload.single('file'), async (req, res) => {
   try {
     console.log('🔍 =========== DIAGNOSIS REQUEST START ===========');
     console.log('📦 Request body:', req.body);
-    console.log('📁 File:', req.file ? req.file.filename : 'No file');
+    console.log('📁 File:', req.file ? req.file.originalname : 'No file');
     
     // Extract form data
     const {
@@ -116,11 +102,22 @@ router.post('/', verifyToken, upload.single('file'), async (req, res) => {
       console.log('🔄 Generated new internal_uuid:', user.internal_uuid);
     }
 
-    // ==================== PREPARE DATA ====================
+    // ==================== UPLOAD TO CLOUDINARY ====================
     let file_url = null;
     if (req.file) {
-      file_url = `/uploads/diagnosis/${req.file.filename}`;
-      console.log('📎 File uploaded:', file_url);
+      try {
+        console.log('☁️  Uploading image to Cloudinary...');
+        const cloudinaryResult = await uploadToCloudinary(req.file.buffer, {
+          folder: 'diagnosis_cases',
+          public_id: `case_${user_firebase_uid}_${Date.now()}`,
+        });
+        file_url = cloudinaryResult.secure_url;
+        console.log('☁️  Cloudinary upload success:', file_url);
+      } catch (uploadError) {
+        console.error('❌ Cloudinary upload failed:', uploadError.message);
+        // Continue without the image rather than failing the entire case
+        console.log('⚠️  Proceeding without image...');
+      }
     }
 
     // Determine severity
@@ -177,7 +174,7 @@ router.post('/', verifyToken, upload.single('file'), async (req, res) => {
       duration,                                   // $6
       medical_history || null,                    // $7
       suspected_disease || null,                  // $8
-      file_url,                                   // $9
+      file_url,                                   // $9 (now a Cloudinary URL)
       severity,                                   // $10
       confidence,                                 // $11
       findings                                    // $12
@@ -463,7 +460,7 @@ router.delete('/case/:id', verifyToken, async (req, res) => {
 
     await client.query('BEGIN');
 
-    // First, get the case to verify ownership if needed
+    // First, get the case to verify ownership and get the file_url for Cloudinary cleanup
     const checkQuery = `
       SELECT dc.*, u.uid as user_firebase_uid 
       FROM diagnosis_cases dc 
@@ -485,7 +482,23 @@ router.delete('/case/:id', verifyToken, async (req, res) => {
       return res.status(403).json({ success: false, error: 'Forbidden: Access denied' });
     }
 
-    // Delete the case
+    // Delete image from Cloudinary if it exists
+    const fileUrl = checkResult.rows[0].file_url;
+    if (fileUrl && fileUrl.includes('cloudinary.com')) {
+      try {
+        const publicId = extractPublicId(fileUrl);
+        if (publicId) {
+          console.log('☁️  Deleting image from Cloudinary:', publicId);
+          await deleteFromCloudinary(publicId);
+          console.log('☁️  Cloudinary image deleted successfully');
+        }
+      } catch (cloudinaryError) {
+        // Log but don't fail the deletion if Cloudinary cleanup fails
+        console.error('⚠️  Cloudinary delete failed (continuing):', cloudinaryError.message);
+      }
+    }
+
+    // Delete the case from database
     const deleteQuery = 'DELETE FROM diagnosis_cases WHERE id = $1 RETURNING *';
     const deleteResult = await client.query(deleteQuery, [id]);
 

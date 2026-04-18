@@ -1,10 +1,11 @@
 const express = require('express');
 const cors = require('cors');
-const diagnosisRoutes = require('./Routes/diagnosis'); // ✅ Add this
+const diagnosisRoutes = require('./Routes/diagnosis');
 const userRoutes = require('./Routes/users');
 const caseQueriesRoutes = require('./Routes/caseQueries');
 const statsRoutes = require('./Routes/stats');
 const profileRoutes = require('./Routes/profile');
+const processXrayRoutes = require('./Routes/getResponse');
 
 
 const app = express();
@@ -16,7 +17,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Health Check Root Route
@@ -34,6 +35,7 @@ app.use('/api/case-queries', caseQueriesRoutes);
 app.use('/api/random-cases', require('./Routes/randomCases'));
 app.use('/api/stats', statsRoutes);
 app.use('/api/profile', profileRoutes);
+app.use('/api/process-xray', processXrayRoutes);
 
 // Add this line to serve uploaded files
 app.use('/uploads', express.static('uploads'));

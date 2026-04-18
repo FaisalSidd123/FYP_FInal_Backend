@@ -1,11 +1,11 @@
-// backend/routes/randomCases.js
+// backend/routes/randomCases.js - UPDATED
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { verifyToken } = require('../middleware/authMiddleware');
 const OpenAI = require('openai');
+const axios = require('axios');
 
-// ── NVIDIA client (OpenAI-compatible SDK) ────────────────────────────────────
 const nvidiaClient = new OpenAI({
     baseURL: 'https://integrate.api.nvidia.com/v1',
     apiKey: process.env.NVIDIA_API_KEY,
@@ -13,64 +13,119 @@ const nvidiaClient = new OpenAI({
 
 const NVIDIA_MODEL = 'meta/llama-3.1-70b-instruct';
 
-
 // ============================================
 // GET /api/random-cases
-// Get random cases (unchanged logic, now also
-// returns theory_questions from the new column)
+// Get random cases with full professional data
 // ============================================
 router.get('/', verifyToken, async (req, res) => {
     try {
-        const { limit = 3 } = req.query;
+        const { limit = 3, specialty, difficulty } = req.query;
 
-        console.log('📋 Fetching random cases...');
+        console.log('📋 Fetching professional medical cases...');
 
-        const query = `
+        let query = `
             SELECT
                 rc.*,
-                COUNT(ca.id)                      AS times_used,
-                COALESCE(AVG(ca.score), 0)::integer AS avg_score
+                COUNT(DISTINCT ca.id) FILTER (WHERE ca.quiz_type = 'mcq') AS mcq_attempts,
+                COUNT(DISTINCT ca.id) FILTER (WHERE ca.quiz_type = 'theory') AS theory_attempts,
+                COALESCE(AVG(
+                    CASE
+                        WHEN ca.quiz_type = 'mcq' AND ca.total_questions > 0
+                            THEN ROUND((ca.score::NUMERIC / ca.total_questions) * 100)
+                        WHEN ca.quiz_type = 'theory' AND ca.total_possible_score > 0
+                            THEN ROUND((ca.score::NUMERIC / ca.total_possible_score) * 100)
+                        ELSE 0
+                    END
+                ), 0)::integer AS avg_score
             FROM random_cases rc
             LEFT JOIN case_attempts ca ON rc.id = ca.case_id
-            GROUP BY rc.id
-            ORDER BY RANDOM()
-            LIMIT $1
         `;
 
-        const result = await pool.query(query, [limit]);
+        const params = [];
+        const conditions = [];
 
-        console.log(`✅ Found ${result.rows.length} random cases`);
+        if (specialty) {
+            conditions.push(`rc.specialty = $${params.length + 1}`);
+            params.push(specialty);
+        }
+
+        if (difficulty) {
+            conditions.push(`rc.difficulty_level = $${params.length + 1}`);
+            params.push(difficulty);
+        }
+
+        if (conditions.length > 0) {
+            query += ' WHERE ' + conditions.join(' AND ');
+        }
+
+        query += `
+            GROUP BY rc.id
+            ORDER BY RANDOM()
+            LIMIT $${params.length + 1}
+        `;
+        params.push(limit);
+
+        const result = await pool.query(query, params);
+
+        console.log(`✅ Retrieved ${result.rows.length} professional cases`);
 
         res.status(200).json({
             success: true,
-            cases: result.rows,   // theory_questions JSONB comes along automatically
+            cases: result.rows,
         });
 
     } catch (error) {
-        console.error('❌ Error fetching random cases:', error);
+        console.error('❌ Error fetching cases:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
     }
 });
 
-
 // ============================================
 // GET /api/random-cases/:id
-// Get single case by UUID
+// Get single case with FULL professional data
 // ============================================
 router.get('/:id', verifyToken, async (req, res) => {
     try {
         const { id } = req.params;
 
-        const result = await pool.query(
-            'SELECT * FROM random_cases WHERE id = $1',
-            [id]
-        );
+        console.log(`📖 Fetching detailed case: ${id}`);
+
+        const query = `
+            SELECT
+                rc.*,
+                COUNT(DISTINCT ca.id) AS total_attempts,
+                COUNT(DISTINCT ca.user_internal_uuid) AS unique_students,
+                COALESCE(AVG(
+                    CASE
+                        WHEN ca.quiz_type = 'mcq' AND ca.total_questions > 0
+                            THEN ROUND((ca.score::NUMERIC / ca.total_questions) * 100)
+                        WHEN ca.quiz_type = 'theory' AND ca.total_possible_score > 0
+                            THEN ROUND((ca.score::NUMERIC / ca.total_possible_score) * 100)
+                        ELSE 0
+                    END
+                ), 0)::integer AS avg_score,
+                COALESCE(AVG(ca.time_spent), 0)::integer AS avg_time_spent
+            FROM random_cases rc
+            LEFT JOIN case_attempts ca ON rc.id = ca.case_id
+            WHERE rc.id = $1
+            GROUP BY rc.id
+        `;
+
+        const result = await pool.query(query, [id]);
 
         if (result.rows.length === 0) {
-            return res.status(404).json({ success: false, error: 'Case not found' });
+            return res.status(404).json({
+                success: false,
+                error: 'Case not found'
+            });
         }
 
-        res.status(200).json({ success: true, case: result.rows[0] });
+        console.log('✅ Case retrieved successfully');
+
+        res.status(200).json({
+            success: true,
+            case: result.rows[0]
+        });
 
     } catch (error) {
         console.error('❌ Error fetching case:', error);
@@ -78,101 +133,304 @@ router.get('/:id', verifyToken, async (req, res) => {
     }
 });
 
-
 // ============================================
-// POST /api/random-cases/evaluate-theory
-// Calls NVIDIA API to score a single paragraph
-// answer against the model answer.
-// Body: { question, model_answer, user_answer, keywords[] }
-// Returns: { score, grade, feedback, key_points_covered, key_points_total }
+// POST /api/random-cases/create
+// Create new professional medical case (admin)
 // ============================================
-router.post('/evaluate-theory', verifyToken, async (req, res) => {
-    const { question, model_answer, user_answer, keywords = [] } = req.body;
-
-    if (!question || !model_answer || !user_answer?.trim()) {
-        return res.status(400).json({
-            success: false,
-            error: 'question, model_answer, and user_answer are all required',
-        });
-    }
-
-    const keywordHint = keywords.length
-        ? `Key medical concepts expected: ${keywords.join(', ')}.`
-        : '';
-
-    const prompt = `You are a strict but fair medical education evaluator.
-
-QUESTION: ${question}
-
-MODEL ANSWER: ${model_answer}
-
-${keywordHint}
-
-STUDENT ANSWER: ${user_answer}
-
-Respond ONLY with a valid JSON object — no markdown, no extra text:
-{
-  "score": <integer 0-10>,
-  "grade": "<Excellent|Good|Partial|Insufficient>",
-  "feedback": "<2-3 sentences: acknowledge what was correct, state what was missing or wrong, suggest what to review>",
-  "key_points_covered": <integer>,
-  "key_points_total": <integer>
-}
-
-Scoring rubric:
-9-10 → Comprehensive, accurate, correct medical terminology
-7-8  → Mostly correct with minor omissions
-5-6  → Core concept understood but significant gaps
-3-4  → Partial understanding, notable errors
-0-2  → Incorrect or irrelevant`;
-
+router.post('/create', verifyToken, async (req, res) => {
     try {
-        const completion = await nvidiaClient.chat.completions.create({
-            model: NVIDIA_MODEL,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.1,
-            top_p: 0.7,
-            max_tokens: 400,
-        });
+        const {
+            // Basic Info
+            case_number,
+            title,
+            specialty,
+            patient_info,
+            severity,
+            confidence,
+            difficulty_level,
+            estimated_time_minutes,
 
-        const raw = completion.choices[0]?.message?.content || '{}';
-        const clean = raw.replace(/```json|```/g, '').trim();
-        const parsed = JSON.parse(clean);
+            // Clinical Presentation
+            chief_complaint,
+            history_of_present_illness,
+            symptoms,
+            past_medical_history,
+            medications,
+            allergies,
+            social_history,
+            family_history,
 
-        // Clamp score to valid range
-        const score = Math.min(10, Math.max(0, parseInt(parsed.score) || 0));
+            // Physical Exam
+            vital_signs,
+            general_examination,
+            systemic_examination,
 
-        console.log(`✅ Theory evaluation complete — score: ${score}/10`);
+            // Investigations
+            laboratory_results,
+            imaging_findings,
+            other_investigations,
 
-        return res.status(200).json({
+            // Diagnosis
+            differential_diagnosis,
+            final_diagnosis,
+            diagnosis_reasoning,
+
+            // Management
+            management_plan,
+            recommendations,
+            tests,
+            prognosis,
+
+            // Educational
+            learning_objectives,
+            key_teaching_points,
+            clinical_pearls,
+            common_pitfalls,
+            references,
+
+            // Quiz
+            questions,
+            theory_questions,
+
+            // Display
+            description,
+            icon,
+            color,
+            tags
+        } = req.body;
+
+        // Get creator's internal UUID
+        const userResult = await pool.query(
+            'SELECT internal_uuid FROM users WHERE uid = $1',
+            [req.user.uid]
+        );
+
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'User not found' });
+        }
+
+        const creatorUuid = userResult.rows[0].internal_uuid;
+
+        const insertQuery = `
+            INSERT INTO random_cases (
+                case_number, title, specialty, patient_info, severity, confidence,
+                difficulty_level, estimated_time_minutes,
+                chief_complaint, history_of_present_illness, symptoms,
+                past_medical_history, medications, allergies, social_history, family_history,
+                vital_signs, general_examination, systemic_examination,
+                laboratory_results, imaging_findings, other_investigations,
+                differential_diagnosis, final_diagnosis, diagnosis_reasoning,
+                management_plan, recommendations, tests, prognosis,
+                learning_objectives, key_teaching_points, clinical_pearls, common_pitfalls, references,
+                questions, theory_questions,
+                description, icon, color, tags, created_by
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+                $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41
+            )
+            RETURNING *
+        `;
+
+        const result = await pool.query(insertQuery, [
+            case_number || `CASE-${Date.now()}`,
+            title,
+            specialty || 'Pulmonology',
+            patient_info,
+            severity,
+            confidence,
+            difficulty_level || 'Intermediate',
+            estimated_time_minutes || 15,
+            chief_complaint,
+            history_of_present_illness,
+            JSON.stringify(symptoms || []),
+            JSON.stringify(past_medical_history || []),
+            JSON.stringify(medications || []),
+            JSON.stringify(allergies || []),
+            JSON.stringify(social_history || {}),
+            family_history,
+            JSON.stringify(vital_signs || {}),
+            general_examination,
+            JSON.stringify(systemic_examination || {}),
+            JSON.stringify(laboratory_results || []),
+            JSON.stringify(imaging_findings || []),
+            JSON.stringify(other_investigations || []),
+            JSON.stringify(differential_diagnosis || []),
+            final_diagnosis,
+            diagnosis_reasoning,
+            JSON.stringify(management_plan || {}),
+            JSON.stringify(recommendations || []),
+            JSON.stringify(tests || []),
+            prognosis,
+            JSON.stringify(learning_objectives || []),
+            JSON.stringify(key_teaching_points || []),
+            JSON.stringify(clinical_pearls || []),
+            JSON.stringify(common_pitfalls || []),
+            JSON.stringify(references || []),
+            JSON.stringify(questions || []),
+            JSON.stringify(theory_questions || []),
+            description,
+            icon || 'FileText',
+            color || 'bg-blue-500',
+            JSON.stringify(tags || []),
+            creatorUuid
+        ]);
+
+        console.log('✅ Professional case created:', result.rows[0].case_number);
+
+        res.status(201).json({
             success: true,
-            score,
-            grade: parsed.grade || 'Insufficient',
-            feedback: parsed.feedback || 'No feedback available.',
-            key_points_covered: parsed.key_points_covered || 0,
-            key_points_total: parsed.key_points_total || 0,
+            message: 'Medical case created successfully',
+            case: result.rows[0]
         });
 
     } catch (error) {
-        console.error('❌ NVIDIA evaluation error:', error);
-        return res.status(500).json({
+        console.error('❌ Error creating case:', error);
+        res.status(500).json({
             success: false,
-            error: 'AI evaluation failed',
-            // Safe fallback so the frontend never breaks
-            score: 0,
-            grade: 'Error',
-            feedback: 'Evaluation service unavailable. Please try again.',
-            key_points_covered: 0,
-            key_points_total: 0,
+            error: 'Failed to create case',
+            details: error.message
         });
     }
 });
 
+// ============================================
+// GET /api/random-cases/filter/specialties
+// Get list of available specialties
+// ============================================
+router.get('/filter/specialties', verifyToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT DISTINCT specialty, COUNT(*) as count
+            FROM random_cases
+            WHERE specialty IS NOT NULL
+            GROUP BY specialty
+            ORDER BY specialty
+        `);
+
+        res.status(200).json({
+            success: true,
+            specialties: result.rows
+        });
+
+    } catch (error) {
+        console.error('❌ Error fetching specialties:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
 
 // ============================================
-// POST /api/random-cases/attempt
-// Save a completed quiz attempt.
-// Handles both quiz_type: "mcq" and "theory".
+// GET /api/random-cases/filter/difficulties
+// Get list of difficulty levels
+// ============================================
+router.get('/filter/difficulties', verifyToken, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT DISTINCT difficulty_level, COUNT(*) as count
+            FROM random_cases
+            WHERE difficulty_level IS NOT NULL
+            GROUP BY difficulty_level
+            ORDER BY 
+                CASE difficulty_level
+                    WHEN 'Beginner' THEN 1
+                    WHEN 'Intermediate' THEN 2
+                    WHEN 'Advanced' THEN 3
+                    WHEN 'Expert' THEN 4
+                    ELSE 5
+                END
+        `);
+
+        res.status(200).json({
+            success: true,
+            difficulties: result.rows
+        });
+
+    } catch (error) {
+        console.error('❌ Error fetching difficulties:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+// ============================================
+// POST /api/random-cases/evaluate-theory
+// ============================================
+router.post('/evaluate-theory', verifyToken, async (req, res) => {
+    try {
+        const { question, model_answer, user_answer, keywords } = req.body;
+        
+        if (!user_answer || !user_answer.trim()) {
+            return res.status(400).json({ success: false, error: "Answer cannot be empty" });
+        }
+
+        const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
+        if (!NVIDIA_API_KEY) {
+            // Mock response if no API key is configured yet
+            console.warn("NVIDIA_API_KEY not found. Using mock evaluation.");
+            return res.status(200).json({
+                success: true,
+                score: 7,
+                grade: "Good",
+                feedback: "Mock feedback: Please configure the NVIDIA API Key in the backend .env to enable real AI evaluation.",
+                key_points_covered: 1,
+                key_points_total: 2
+            });
+        }
+
+        // Prepare context for the AI
+        const prompt = `You are a medical professor grading a student's answer. 
+        Question: ${question}
+        Model Answer: ${model_answer}
+        Keywords expected: ${keywords ? keywords.join(", ") : "None specified"}
+        Student Answer: ${user_answer}
+        
+        Evaluate the student's answer. Give a score from 0 to 10. Grade as one of: [Excellent, Good, Partial, Insufficient].
+        Count how many key points were covered based on the model answer.
+        Provide a concise, helpful feedback paragraph.
+        
+        Return ONLY valid JSON in this exact format:
+        {
+          "score": 8,
+          "grade": "Good",
+          "feedback": "...",
+          "key_points_covered": 3,
+          "key_points_total": 4
+        }`;
+
+        const response = await axios.post("https://integrate.api.nvidia.com/v1/chat/completions", {
+            model: "meta/llama-3.1-70b-instruct",
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.2,
+            max_tokens: 1024
+        }, {
+            headers: {
+                "Authorization": `Bearer ${NVIDIA_API_KEY}`,
+                "Content-Type": "application/json"
+            }
+        });
+
+        let aiText = response.data.choices[0].message.content;
+        // Clean up markdown markers if any
+        aiText = aiText.replace(/```json/g, '').replace(/```/g, '').trim();
+        const evalJson = JSON.parse(aiText);
+
+        res.status(200).json({
+            success: true,
+            score: evalJson.score,
+            grade: evalJson.grade,
+            feedback: evalJson.feedback,
+            key_points_covered: evalJson.key_points_covered,
+            key_points_total: evalJson.key_points_total
+        });
+
+    } catch (error) {
+        console.error("❌ Error evaluating theory:", error);
+        res.status(500).json({ success: false, error: "Failed to evaluate answer" });
+    }
+});
+
+// ============================================
+// POST /api/random-cases/attempt - Save case attempt
 // ============================================
 router.post('/attempt', verifyToken, async (req, res) => {
     const client = await pool.connect();
@@ -180,31 +438,26 @@ router.post('/attempt', verifyToken, async (req, res) => {
     try {
         const {
             case_id,
-            quiz_type = 'mcq',          // NEW — "mcq" | "theory"
-
-            // MCQ fields (existing)
-            answers = [],
-            score = 0,
+            user_firebase_uid,
+            quiz_type,
+            answers,
+            theory_answers,
+            score,
             total_questions,
-            time_spent = 0,
-
-            // Theory fields (new)
-            theory_answers = [],   // [{question_index, answer_text, score, grade, feedback, ...}]
-            total_possible_score,       // theory: total_questions * 10
+            total_possible_score,
+            time_spent
         } = req.body;
 
-        // Always trust the verified JWT for the UID instead of request body
-        const uid = req.user.uid;
-
-        console.log('📝 Saving case attempt:', { case_id, uid, quiz_type, score });
+        const uidToCheck = user_firebase_uid || req.user.uid;
+        if (uidToCheck !== req.user.uid) {
+            return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
+        }
 
         await client.query('BEGIN');
 
-        // Resolve firebase uid → internal uuid (same as before)
-        const userResult = await client.query(
-            'SELECT internal_uuid FROM users WHERE uid = $1',
-            [uid]
-        );
+        // Get user internal UUID
+        const userQuery = 'SELECT internal_uuid FROM users WHERE uid = $1';
+        const userResult = await client.query(userQuery, [req.user.uid]);
 
         if (userResult.rows.length === 0) {
             await client.query('ROLLBACK');
@@ -213,60 +466,60 @@ router.post('/attempt', verifyToken, async (req, res) => {
 
         const userInternalUuid = userResult.rows[0].internal_uuid;
 
-        // Insert attempt — new columns have DB defaults so old MCQ saves still work
-        const insertResult = await client.query(
-            `INSERT INTO case_attempts (
-                case_id,
-                user_internal_uuid,
-                quiz_type,
-                answers,
-                theory_answers,
-                score,
-                total_questions,
-                total_possible_score,
-                time_spent
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING *`,
-            [
-                case_id,
-                userInternalUuid,
-                quiz_type,
-                JSON.stringify(answers),
-                JSON.stringify(theory_answers),
-                score,
-                total_questions || (quiz_type === 'theory' ? theory_answers.length : 0),
-                total_possible_score || null,
-                time_spent,
-            ]
-        );
+        // Insert attempt
+        const insertQuery = `
+      INSERT INTO case_attempts (
+        case_id,
+        user_internal_uuid,
+        quiz_type,
+        answers,
+        theory_answers,
+        score,
+        total_questions,
+        total_possible_score,
+        time_spent
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+    `;
 
-        // Update case stats — unified percentage regardless of quiz type
-        await client.query(
-            `UPDATE random_cases
-             SET
-                times_used = times_used + 1,
-                avg_score  = (
-                    SELECT COALESCE(AVG(
-                        CASE
-                            WHEN quiz_type = 'mcq'    AND total_questions     > 0
-                                THEN ROUND((score::NUMERIC / total_questions)     * 100)
-                            WHEN quiz_type = 'theory' AND total_possible_score > 0
-                                THEN ROUND((score::NUMERIC / total_possible_score) * 100)
-                            ELSE 0
-                        END
-                    ), 0)::integer
-                    FROM case_attempts
-                    WHERE case_id = $1
-                )
-             WHERE id = $1`,
-            [case_id]
-        );
+        const insertResult = await client.query(insertQuery, [
+            case_id,
+            userInternalUuid,
+            quiz_type || 'mcq',
+            JSON.stringify(answers || []),
+            JSON.stringify(theory_answers || []),
+            score,
+            total_questions,
+            total_possible_score || (total_questions * 10), // default assumption for MCQ or simple rating
+            time_spent
+        ]);
 
+        // Update case stats
+        const updateQuery = `
+      UPDATE random_cases 
+      SET 
+        times_used = times_used + 1,
+        avg_score = (
+          SELECT COALESCE(AVG(
+            CASE 
+                WHEN total_possible_score > 0 THEN (score::float / total_possible_score) * 100
+                WHEN quiz_type = 'mcq' AND total_questions > 0 THEN (score::float / total_questions) * 100
+                ELSE 0
+            END
+          ), 0)::integer
+          FROM case_attempts
+          WHERE case_id = $1
+        )
+      WHERE id = $1
+      RETURNING *
+    `;
+
+        await client.query(updateQuery, [case_id]);
         await client.query('COMMIT');
 
         res.status(201).json({
             success: true,
-            attempt: insertResult.rows[0],
+            attempt: insertResult.rows[0]
         });
 
     } catch (error) {
@@ -277,62 +530,5 @@ router.post('/attempt', verifyToken, async (req, res) => {
         client.release();
     }
 });
-
-
-// ============================================
-// GET /api/random-cases/user/:userUuid/attempts
-// Get all attempts for a user (both mcq + theory)
-// ============================================
-router.get('/user/:userUuid/attempts', verifyToken, async (req, res) => {
-    try {
-        const { userUuid } = req.params;
-
-        if (userUuid !== req.user.uid) {
-            return res.status(403).json({ success: false, error: 'Forbidden: UID mismatch' });
-        }
-
-        const userResult = await pool.query(
-            'SELECT internal_uuid FROM users WHERE uid = $1',
-            [userUuid]
-        );
-
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ success: false, error: 'User not found' });
-        }
-
-        const userInternalUuid = userResult.rows[0].internal_uuid;
-
-        const result = await pool.query(
-            `SELECT
-                ca.*,
-                rc.title,
-                rc.severity,
-                rc.patient_info,
-                -- Unified percentage for frontend display
-                CASE
-                    WHEN ca.quiz_type = 'mcq'    AND ca.total_questions     > 0
-                        THEN ROUND((ca.score::NUMERIC / ca.total_questions)     * 100)
-                    WHEN ca.quiz_type = 'theory' AND ca.total_possible_score > 0
-                        THEN ROUND((ca.score::NUMERIC / ca.total_possible_score) * 100)
-                    ELSE 0
-                END AS percentage
-            FROM case_attempts ca
-            JOIN random_cases rc ON ca.case_id = rc.id
-            WHERE ca.user_internal_uuid = $1
-            ORDER BY ca.completed_at DESC`,
-            [userInternalUuid]
-        );
-
-        res.status(200).json({
-            success: true,
-            attempts: result.rows,
-        });
-
-    } catch (error) {
-        console.error('❌ Error fetching attempts:', error);
-        res.status(500).json({ success: false, error: 'Internal server error' });
-    }
-});
-
 
 module.exports = router;
