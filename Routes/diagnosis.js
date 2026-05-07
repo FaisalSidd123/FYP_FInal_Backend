@@ -449,6 +449,76 @@ router.get('/case/:id', verifyToken, async (req, res) => {
 });
 
 // ============================================
+// PATCH /api/diagnosis/case/:id/analysis - Save AI analysis to case
+// ============================================
+router.patch('/case/:id/analysis', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { ai_analysis } = req.body;
+
+    console.log('💾 Saving AI analysis for case:', id);
+
+    if (!ai_analysis) {
+      return res.status(400).json({ success: false, error: 'ai_analysis is required' });
+    }
+
+    // Verify ownership
+    const checkQuery = `
+      SELECT dc.id, u.uid as user_firebase_uid
+      FROM diagnosis_cases dc
+      JOIN users u ON dc.user_internal_uuid = u.internal_uuid
+      WHERE dc.id = $1
+    `;
+    const checkResult = await pool.query(checkQuery, [id]);
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Case not found' });
+    }
+    if (checkResult.rows[0].user_firebase_uid !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    // Update with AI analysis + overwrite severity/confidence/findings from real AI data
+    const updateQuery = `
+      UPDATE diagnosis_cases
+      SET ai_analysis = $1,
+          severity = COALESCE($2, severity),
+          confidence = COALESCE($3, confidence),
+          findings = COALESCE($4, findings),
+          updated_at = NOW()
+      WHERE id = $5
+      RETURNING *
+    `;
+
+    const severity = ai_analysis.severity || null;
+    const confidence = ai_analysis.confidence != null
+      ? Math.round(ai_analysis.confidence > 1 ? ai_analysis.confidence : ai_analysis.confidence * 100)
+      : null;
+    const findings = ai_analysis.full_findings || null;
+
+    const result = await pool.query(updateQuery, [
+      JSON.stringify(ai_analysis),
+      severity,
+      confidence,
+      findings,
+      id
+    ]);
+
+    console.log('✅ AI analysis saved for case:', id);
+
+    res.status(200).json({
+      success: true,
+      message: 'AI analysis saved',
+      case: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error saving AI analysis:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// ============================================
 // DELETE /api/diagnosis/case/:id - Delete a case
 // ============================================
 router.delete('/case/:id', verifyToken, async (req, res) => {
