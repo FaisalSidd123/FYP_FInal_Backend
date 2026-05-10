@@ -6,7 +6,7 @@ const caseQueriesRoutes = require('./Routes/caseQueries');
 const statsRoutes = require('./Routes/stats');
 const profileRoutes = require('./Routes/profile');
 const processXrayRoutes = require('./Routes/getResponse');
-
+const ragChatRoutes = require('./Routes/ragChat');
 
 const app = express();
 
@@ -36,6 +36,7 @@ app.use('/api/random-cases', require('./Routes/randomCases'));
 app.use('/api/stats', statsRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/process-xray', processXrayRoutes);
+app.use('/api/rag', ragChatRoutes);
 
 // Add this line to serve uploaded files
 app.use('/uploads', express.static('uploads'));
