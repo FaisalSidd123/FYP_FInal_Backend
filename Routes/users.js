@@ -1,8 +1,26 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
-
+const multer = require('multer');
 const { verifyToken } = require('../middleware/authMiddleware');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../cloudinary');
+
+// Configure multer for memory storage
+const storage = multer.memoryStorage();
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif'];
+  if (allowedTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Only JPEG, PNG and GIF are allowed.'), false);
+  }
+};
+
+const upload = multer({ 
+  storage: storage,
+  fileFilter: fileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+});
 
 // POST /api/users/sync - Sync user with database
 router.post('/sync', verifyToken, async (req, res) => {
@@ -176,7 +194,7 @@ router.get('/:uid', verifyToken, async (req, res) => {
 
 // Updated backend route - users.js (add this PUT endpoint)
 // PUT /api/users/:uid - Update user profile with role details
-router.put('/:uid', verifyToken, async (req, res) => {
+router.put('/:uid', verifyToken, upload.single('profile_image'), async (req, res) => {
   try {
     const { uid } = req.params;
 
@@ -199,21 +217,39 @@ router.put('/:uid', verifyToken, async (req, res) => {
       role_completed
     } = req.body;
 
+    // Handle profile image upload to Cloudinary
+    if (req.file) {
+      try {
+        console.log('☁️ Uploading profile image to Cloudinary...');
+        const cloudinaryResult = await uploadToCloudinary(req.file.buffer, {
+          folder: 'profile_images',
+          public_id: `user_${uid}_${Date.now()}`,
+        });
+        photo_url = cloudinaryResult.secure_url;
+        console.log('☁️ Profile image uploaded:', photo_url);
+      } catch (uploadError) {
+        console.error('❌ Profile image upload failed:', uploadError.message);
+      }
+    }
+
     // Fix for empty string being passed to integer fields
     if (experience_years === '') experience_years = null;
     if (age === '') age = null;
 
     console.log('🔄 Updating user:', uid);
-    console.log('📋 Update data:', { role, specialization, age, gender });
+    console.log('📋 Request Body:', req.body);
+    console.log('📋 Files:', req.file ? 'File received' : 'No file');
 
     // First check if columns exist, if not, alter table
     const checkColumnsQuery = `
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name='users'
+      WHERE table_name='users' AND table_schema='public'
     `;
+    console.log('🔍 Checking existing columns for public.users...');
     const columnsResult = await pool.query(checkColumnsQuery);
     const existingColumns = columnsResult.rows.map(row => row.column_name);
+    console.log('📊 Existing columns:', existingColumns);
 
     // Add missing columns if they don't exist
     const columnsToAdd = [

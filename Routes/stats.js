@@ -235,11 +235,13 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
 
 // Helper function to calculate rank based on performance
 function calculateRank(accuracyRate, totalCases) {
+    if (totalCases === 0 && accuracyRate === 0) return "Not Ranked";
     if (accuracyRate >= 90 && totalCases >= 20) return "Top 5%";
     if (accuracyRate >= 80 && totalCases >= 10) return "Top 10%";
     if (accuracyRate >= 70 && totalCases >= 5) return "Top 15%";
-    if (accuracyRate >= 60) return "Top 25%";
-    return "Top 50%";
+    if (accuracyRate >= 60 && totalCases >= 2) return "Top 25%";
+    if (accuracyRate >= 40) return "Top 50%";
+    return "Top 75%";
 }
 
 module.exports = router;
