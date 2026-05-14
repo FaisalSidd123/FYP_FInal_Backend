@@ -93,12 +93,19 @@ router.get('/stats/:uid', verifyToken, async (req, res) => {
             parseInt(quizStats.rows[0].perfect_scores) || 0
         );
 
-        // Calculate XP and level
-        const { level, xp, nextLevelXp } = calculateLevelAndXP(
-            parseInt(diagnosisStats.rows[0].total_diagnosis_cases) || 0,
-            parseInt(quizStats.rows[0].total_quiz_attempts) || 0,
-            overallAccuracy
-        );
+        // Get mastery stats (sync with dashboard)
+        const masteryQuery = 'SELECT * FROM user_mastery WHERE user_internal_uuid = $1';
+        const masteryResult = await pool.query(masteryQuery, [userInternalUuid]);
+        let level = 1;
+        let xp = 0;
+        let nextLevelXp = 1000;
+        
+        if (masteryResult.rows.length > 0) {
+            level = masteryResult.rows[0].current_level || 1;
+            const totalXp = masteryResult.rows[0].total_xp || 0;
+            xp = totalXp % 1000;
+            nextLevelXp = 1000;
+        }
 
         // Compile all statistics
         const profileStats = {
@@ -193,18 +200,8 @@ function calculateRank(accuracy, totalCases, perfectScores) {
     if (accuracy >= 90 && totalCases >= 15 && perfectScores >= 3) return "Master Clinician";
     if (accuracy >= 85 && totalCases >= 10 && perfectScores >= 1) return "Senior Resident";
     if (accuracy >= 80 && totalCases >= 5) return "Junior Resident";
-    if (accuracy >= 70 && totalCases >= 2) return "Medical Student";
+    if (accuracy >= 70 && totalCases >= 2) return "Medical Professional";
     return "Novice";
-}
-
-// Helper function to calculate level and XP
-function calculateLevelAndXP(totalCases, totalQuizzes, accuracy) {
-    const baseXP = (totalCases * 10) + (totalQuizzes * 5) + (accuracy * 2);
-    const level = Math.floor(baseXP / 100) + 1;
-    const xp = baseXP % 100;
-    const nextLevelXp = 100;
-
-    return { level, xp, nextLevelXp };
 }
 
 module.exports = router;

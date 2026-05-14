@@ -262,7 +262,7 @@ function calculateProficiency(accuracyRate, totalCases) {
     if (accuracyRate >= 80 && totalCases >= 15) return "Senior Resident";
     if (accuracyRate >= 70 && totalCases >= 5) return "Resident";
     if (accuracyRate >= 50) return "Junior Resident";
-    return "Medical Student";
+    return "Medical Professional";
 }
 
 module.exports = router;
