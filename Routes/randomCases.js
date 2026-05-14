@@ -517,6 +517,13 @@ router.post('/attempt', verifyToken, async (req, res) => {
         await client.query(updateQuery, [case_id]);
         await client.query('COMMIT');
 
+        // ==================== TRACK ACTIVITY ====================
+        const AchievementService = require('../Services/achievementService');
+        await AchievementService.trackActivity(userInternalUuid, 'quiz', {
+            score,
+            total_possible: total_possible_score || (total_questions * 10)
+        });
+
         res.status(201).json({
             success: true,
             attempt: insertResult.rows[0]

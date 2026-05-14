@@ -188,6 +188,10 @@ router.post('/', verifyToken, upload.single('file'), async (req, res) => {
     console.log('✅ DIAGNOSIS CASE CREATED!');
     console.log('🆔 Case ID:', insertResult.rows[0].id);
 
+    // ==================== TRACK ACTIVITY ====================
+    const AchievementService = require('../Services/achievementService');
+    await AchievementService.trackActivity(user.internal_uuid, 'diagnosis');
+
     res.status(201).json({
       success: true,
       message: 'Diagnosis case created successfully',

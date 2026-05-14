@@ -30,7 +30,32 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
 
         const userInternalUuid = userResult.rows[0].internal_uuid;
 
-        // Get diagnosis cases statistics
+        // 1. Get Mastery Data (Level, XP, etc.)
+        const masteryQuery = 'SELECT * FROM user_mastery WHERE user_internal_uuid = $1';
+        const masteryResult = await pool.query(masteryQuery, [userInternalUuid]);
+        
+        // If not exists, create initial
+        let mastery = masteryResult.rows[0];
+        if (!mastery) {
+            const initMastery = await pool.query(`
+                INSERT INTO user_mastery (user_internal_uuid) 
+                VALUES ($1) 
+                RETURNING *
+            `, [userInternalUuid]);
+            mastery = initMastery.rows[0];
+        }
+
+        // 2. Get Earned Achievements
+        const achievementsQuery = `
+            SELECT a.*, ua.unlocked_at 
+            FROM user_achievements ua
+            JOIN achievements a ON ua.achievement_id = a.id
+            WHERE ua.user_internal_uuid = $1
+            ORDER BY ua.unlocked_at DESC
+        `;
+        const achievementsResult = await pool.query(achievementsQuery, [userInternalUuid]);
+
+        // 3. Get diagnosis cases statistics
         const diagnosisStatsQuery = `
       SELECT 
         COUNT(*) as total_diagnosis_cases,
@@ -41,10 +66,9 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
       FROM diagnosis_cases 
       WHERE user_internal_uuid = $1
     `;
-
         const diagnosisStats = await pool.query(diagnosisStatsQuery, [userInternalUuid]);
 
-        // Get case attempts statistics (from quiz)
+        // 4. Get case attempts statistics (from quiz)
         const caseAttemptsStatsQuery = `
       SELECT 
         COUNT(*) as total_quiz_attempts,
@@ -59,10 +83,9 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
       FROM case_attempts 
       WHERE user_internal_uuid = $1
     `;
-
         const caseAttemptsStats = await pool.query(caseAttemptsStatsQuery, [userInternalUuid]);
 
-        // Get recent activity (combine diagnosis and quiz attempts)
+        // 5. Get recent activity
         const recentActivityQuery = `
       (SELECT 
         'diagnosis' as type,
@@ -88,10 +111,9 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
       ORDER BY date DESC
       LIMIT 5
     `;
-
         const recentActivity = await pool.query(recentActivityQuery, [userInternalUuid]);
 
-        // Get learning streak (consecutive days with activity)
+        // 6. Get learning streak
         const streakQuery = `
       WITH daily_activity AS (
         SELECT DISTINCT DATE(created_at) as activity_date
@@ -120,11 +142,10 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
         WHERE activity_date = CURRENT_DATE
       )
     `;
-
         const streakResult = await pool.query(streakQuery, [userInternalUuid]);
         const currentStreak = streakResult.rows[0]?.current_streak || 0;
 
-        // Calculate accuracy rate from quiz attempts
+        // 7. Calculate accuracy rate
         const accuracyQuery = `
       SELECT 
         CASE 
@@ -135,11 +156,10 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
       FROM case_attempts
       WHERE user_internal_uuid = $1
     `;
-
         const accuracyResult = await pool.query(accuracyQuery, [userInternalUuid]);
         const accuracyRate = accuracyResult.rows[0]?.accuracy_rate || 0;
 
-        // Get weekly progress for charts
+        // 8. Get weekly progress
         const weeklyProgressQuery = `
       WITH last_7_days AS (
         SELECT generate_series(
@@ -179,16 +199,18 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
       LEFT JOIN daily_quizzes dq ON ld.day = dq.day
       ORDER BY ld.day
     `;
-
         const weeklyProgress = await pool.query(weeklyProgressQuery, [userInternalUuid]);
 
         // Compile all statistics
         const stats = {
-            modules: {
-                completed: parseInt(diagnosisStats.rows[0].total_diagnosis_cases) || 0,
-                inProgress: 0, // This would need a separate table for modules
-                total: 12 // You can set this based on your total available modules
+            mastery: {
+                level: mastery.current_level,
+                xp: mastery.total_xp,
+                xp_to_next_level: 1000 - (mastery.total_xp % 1000),
+                total_xp_for_level: 1000,
+                progress_percent: Math.round(((mastery.total_xp % 1000) / 1000) * 100)
             },
+            achievements: achievementsResult.rows,
             diagnosis: {
                 total_cases: parseInt(diagnosisStats.rows[0].total_diagnosis_cases) || 0,
                 high_severity: parseInt(diagnosisStats.rows[0].high_severity_cases) || 0,
@@ -208,9 +230,8 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
             learning: {
                 current_streak: currentStreak,
                 accuracy_rate: accuracyRate,
-                total_practice_hours: (parseInt(caseAttemptsStats.rows[0].total_questions_attempted || 0) * 2) / 60, // Rough estimate
-                last_activity: diagnosisStats.rows[0].last_diagnosis_date || caseAttemptsStats.rows[0].last_quiz_date || null,
-                rank: calculateRank(accuracyRate, parseInt(diagnosisStats.rows[0].total_diagnosis_cases) || 0)
+                last_activity: mastery.last_activity || diagnosisStats.rows[0].last_diagnosis_date || caseAttemptsStats.rows[0].last_quiz_date || null,
+                proficiency: calculateProficiency(accuracyRate, parseInt(diagnosisStats.rows[0].total_diagnosis_cases) || 0)
             },
             recent_activity: recentActivity.rows,
             weekly_progress: weeklyProgress.rows
@@ -233,15 +254,15 @@ router.get('/dashboard/:uid', verifyToken, async (req, res) => {
     }
 });
 
-// Helper function to calculate rank based on performance
-function calculateRank(accuracyRate, totalCases) {
-    if (totalCases === 0 && accuracyRate === 0) return "Not Ranked";
-    if (accuracyRate >= 90 && totalCases >= 20) return "Top 5%";
-    if (accuracyRate >= 80 && totalCases >= 10) return "Top 10%";
-    if (accuracyRate >= 70 && totalCases >= 5) return "Top 15%";
-    if (accuracyRate >= 60 && totalCases >= 2) return "Top 25%";
-    if (accuracyRate >= 40) return "Top 50%";
-    return "Top 75%";
+// Helper function to calculate clinical proficiency tier
+function calculateProficiency(accuracyRate, totalCases) {
+    if (totalCases === 0 && accuracyRate === 0) return "Intern";
+    if (accuracyRate >= 95 && totalCases >= 50) return "Consultant";
+    if (accuracyRate >= 90 && totalCases >= 30) return "Specialist";
+    if (accuracyRate >= 80 && totalCases >= 15) return "Senior Resident";
+    if (accuracyRate >= 70 && totalCases >= 5) return "Resident";
+    if (accuracyRate >= 50) return "Junior Resident";
+    return "Medical Student";
 }
 
 module.exports = router;
