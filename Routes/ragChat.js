@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require('../db');
 const { verifyToken } = require('../middleware/authMiddleware');
 
-const RAG_API_URL = process.env.RAG_API_URL || 'https://repaying-attendee-frenzied.ngrok-free.dev';
+const RAG_BASE_URL = process.env.RAG_BASE_URL || process.env.RAG_API_URL || 'https://splendor-bonelike-subatomic.ngrok-free.dev';
 
 // Helper to check case access
 async function checkCaseAccess(caseId, reqUser) {
@@ -32,12 +32,38 @@ router.get('/case/:caseId/history', verifyToken, async (req, res) => {
         let sessionId;
 
         if (sessionRes.rows.length === 0) {
-            // Create a session in our DB (Alternatively, could hit Model 2 /sessions, but Model 2 auto-creates if missing during /query, so creating local is fine)
+            console.log(`Creating a new RAG v6 session for case ${caseId} at ${RAG_BASE_URL}/sessions...`);
+            let sessionData = null;
+            try {
+                const sessionResponse = await fetch(`${RAG_BASE_URL}/sessions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        case_id: parseInt(caseId),
+                        session_type: "clinical_chat",
+                        session_name: `Case ${caseId} Discussion`
+                    })
+                });
+
+                if (!sessionResponse.ok) {
+                    throw new Error(`RAG API sessions returned status ${sessionResponse.status}`);
+                }
+                sessionData = await sessionResponse.json();
+            } catch (sessionApiError) {
+                console.error('⚠️ Failed to register session with RAG v6 FastAPI service:', sessionApiError);
+                // Fallback: Generate local UUID if RAG service is unreachable during history load
+                const { v4: uuidv4 } = require('uuid');
+                sessionData = { session_id: uuidv4() };
+            }
+
+            // Create the session in our local database mapping to the session_id UUID returned
             const insertSession = await pool.query(
-                `INSERT INTO chat_sessions (case_id, session_name, session_type) VALUES ($1, $2, $3) RETURNING id`,
-                [caseId, `Case ${caseId} Discussion`, 'clinical_chat']
+                `INSERT INTO chat_sessions (id, case_id, session_name, session_type) 
+                 VALUES ($1, $2, $3, $4) RETURNING id`,
+                [sessionData.session_id, caseId, `Case ${caseId} Discussion`, 'clinical_chat']
             );
             sessionId = insertSession.rows[0].id;
+            console.log(`✅ Session registered locally with ID: ${sessionId}`);
         } else {
             sessionId = sessionRes.rows[0].id;
         }
@@ -61,7 +87,7 @@ router.get('/case/:caseId/history', verifyToken, async (req, res) => {
 
 // ============================================
 // POST /api/rag/query
-// Proxies query to FastAPI Model 2 and saves to local DB
+// Proxies query to FastAPI Clinical RAG v6 model and saves to local DB
 // ============================================
 router.post('/query', verifyToken, async (req, res) => {
     try {
@@ -74,16 +100,40 @@ router.post('/query', verifyToken, async (req, res) => {
         const access = await checkCaseAccess(case_id, req.user);
         if (access.error) return res.status(access.status).json({ success: false, error: access.error });
 
-        // Ensure we have a local session
+        // Ensure we have an active local session
         let activeSessionId = session_id;
         if (!activeSessionId) {
             const sessionRes = await pool.query('SELECT id FROM chat_sessions WHERE case_id = $1 ORDER BY created_at DESC LIMIT 1', [case_id]);
             if (sessionRes.rows.length > 0) {
                 activeSessionId = sessionRes.rows[0].id;
             } else {
+                console.log(`Initializing new session for query because none was found...`);
+                let sessionData = null;
+                try {
+                    const sessionResponse = await fetch(`${RAG_BASE_URL}/sessions`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            case_id: parseInt(case_id),
+                            session_type: "clinical_chat",
+                            session_name: `Case ${case_id} Discussion`
+                        })
+                    });
+                    if (sessionResponse.ok) {
+                        sessionData = await sessionResponse.json();
+                    } else {
+                        throw new Error(`RAG API returned status ${sessionResponse.status}`);
+                    }
+                } catch (sessionApiError) {
+                    console.error('⚠️ Session API Error:', sessionApiError);
+                    const { v4: uuidv4 } = require('uuid');
+                    sessionData = { session_id: uuidv4() };
+                }
+
                 const insertSession = await pool.query(
-                    `INSERT INTO chat_sessions (case_id, session_name, session_type) VALUES ($1, $2, $3) RETURNING id`,
-                    [case_id, `Case ${case_id} Discussion`, 'clinical_chat']
+                    `INSERT INTO chat_sessions (id, case_id, session_name, session_type) 
+                     VALUES ($1, $2, $3, $4) RETURNING id`,
+                    [sessionData.session_id, case_id, `Case ${case_id} Discussion`, 'clinical_chat']
                 );
                 activeSessionId = insertSession.rows[0].id;
             }
@@ -97,52 +147,76 @@ router.post('/query', verifyToken, async (req, res) => {
         );
         const userMessage = insertUserMsg.rows[0];
 
-        // 🚀 Forward to RAG API (Model 2)
-        console.log(`Forwarding query to ${RAG_API_URL}/query`);
+        // 🚀 Forward to Clinical RAG v6 API
+        console.log(`Forwarding query to RAG v6 at ${RAG_BASE_URL}/chat`);
         let ragResponseData = null;
         try {
-            const response = await fetch(`${RAG_API_URL}/query`, {
+            const response = await fetch(`${RAG_BASE_URL}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    user_query: user_query,
+                    query: user_query,
                     case_id: parseInt(case_id),
-                    // Let FastAPI generate its own session or link by case_id
-                    session_type: "clinical_chat" 
+                    session_id: activeSessionId,
+                    attached_xray_url: null,
+                    attached_pdf_url: null
                 })
             });
-            
+
             if (!response.ok) {
-                throw new Error(`RAG API returned ${response.status}`);
+                throw new Error(`RAG v6 API returned status ${response.status}`);
             }
             ragResponseData = await response.json();
-            
+
         } catch (apiError) {
             console.error('❌ RAG API Error:', apiError);
-            return res.status(502).json({ 
-                success: false, 
+            return res.status(502).json({
+                success: false,
                 error: 'Failed to communicate with RAG API',
                 user_message: userMessage
             });
         }
 
         // Save AI message to local DB
-        const aiContent = ragResponseData.clinical_response || "Sorry, I could not generate a response.";
+        const aiContent = ragResponseData.answer || "Sorry, I could not generate a response.";
         const citations = ragResponseData.citations || [];
+        const intent = ragResponseData.intent || 'clinical_query';
         const metadata = {
-            mode: ragResponseData.mode,
-            retrieval_eval: ragResponseData.retrieval_eval,
-            case_chunks_used: ragResponseData.case_chunks_used,
-            latency_seconds: ragResponseData.latency_seconds,
-            active_llm: ragResponseData.active_llm
+            retrieval_count: ragResponseData.retrieval_count,
+            top_score: ragResponseData.top_score,
+            used_modes: ragResponseData.used_modes,
+            ai_baseline_used: ragResponseData.ai_baseline_used,
+            model: ragResponseData.model,
+            latency_s: ragResponseData.latency_s,
+            rewritten_query: ragResponseData.rewritten_query,
+            xray_ingest: ragResponseData.xray_ingest,
+            pdf_ingest: ragResponseData.pdf_ingest
         };
 
         const insertAiMsg = await pool.query(
-            `INSERT INTO chat_messages (case_id, session_id, role, message_type, content, cited_documents, metadata) 
-             VALUES ($1, $2, 'assistant', 'text', $3, $4, $5) RETURNING *`,
-            [case_id, activeSessionId, aiContent, JSON.stringify(citations), JSON.stringify(metadata)]
+            `INSERT INTO chat_messages (case_id, session_id, role, message_type, content, cited_documents, token_count, intent, metadata) 
+             VALUES ($1, $2, 'assistant', 'text', $3, $4, $5, $6, $7) RETURNING *`,
+            [
+                case_id, 
+                activeSessionId, 
+                aiContent, 
+                JSON.stringify(citations), 
+                null, // token_count (null/not currently returned by RAG chat JSON but supported by schema)
+                intent,
+                JSON.stringify(metadata)
+            ]
         );
         const aiMessage = insertAiMsg.rows[0];
+
+        // Keep local chat_sessions total_turns updated
+        await pool.query(
+            `UPDATE chat_sessions 
+             SET total_turns = COALESCE(total_turns, 0) + 2, 
+                 last_intent = $1, 
+                 updated_at = NOW() 
+             WHERE id = $2`,
+            [intent, activeSessionId]
+        );
 
         res.status(200).json({
             success: true,

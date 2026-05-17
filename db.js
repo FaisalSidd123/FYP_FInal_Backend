@@ -3,11 +3,19 @@ require('dotenv').config();
 
 // Connect using DATABASE_URL if available (Railway standard), 
 // otherwise fallback to individual environment variables or local hardcoded strings
+const baseConfig = {
+  keepAlive: true,
+  keepalive: true, // both styles for safety
+  max: 10, // keep local development pool light
+  idleTimeoutMillis: 10000, // close idle connections after 10s to prevent unexpected drops
+  connectionTimeoutMillis: 5000, // wait 5s to connect before timing out
+};
+
 const connectionConfig = process.env.DATABASE_URL 
   ? { 
       connectionString: process.env.DATABASE_URL,
       ssl: { rejectUnauthorized: false },
-      connectionTimeoutMillis: 10000,
+      ...baseConfig
     }
   : {
       // Changed to the reliable IPv4 pooler settings to prevent ENOTFOUND / IPv6 network blocks locally
@@ -19,10 +27,15 @@ const connectionConfig = process.env.DATABASE_URL
       ssl: {
         rejectUnauthorized: false
       },
-      connectionTimeoutMillis: 10000,
+      ...baseConfig
     };
 
 const pool = new Pool(connectionConfig);
+
+// Handle idle connection errors gracefully without crashing the server
+pool.on('error', (err, client) => {
+  console.error('⚠️ Unexpected error on idle client in pg pool:', err.message);
+});
 
 // Test the connection
 pool.connect((err, client, release) => {
