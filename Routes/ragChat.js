@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require('../db');
 const { verifyToken } = require('../middleware/authMiddleware');
 
-const RAG_BASE_URL = process.env.RAG_BASE_URL || process.env.RAG_API_URL || 'https://splendor-bonelike-subatomic.ngrok-free.dev';
+const RAG_BASE_URL = process.env.RAG_BASE_URL || process.env.RAG_API_URL || 'https://clickless-aaliyah-maternally.ngrok-free.dev';
 
 // Helper to check case access
 async function checkCaseAccess(caseId, reqUser) {
@@ -150,8 +150,11 @@ router.post('/query', verifyToken, async (req, res) => {
         // 🚀 Forward to Clinical RAG v6 API
         console.log(`Forwarding query to RAG v6 at ${RAG_BASE_URL}/chat`);
         let ragResponseData = null;
+        let responseStatus = 200;
+        let response = null;
+
         try {
-            const response = await fetch(`${RAG_BASE_URL}/chat`, {
+            response = await fetch(`${RAG_BASE_URL}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -162,17 +165,112 @@ router.post('/query', verifyToken, async (req, res) => {
                     attached_pdf_url: null
                 })
             });
-
-            if (!response.ok) {
-                throw new Error(`RAG v6 API returned status ${response.status}`);
+            responseStatus = response.status;
+            if (response.ok) {
+                ragResponseData = await response.json();
             }
-            ragResponseData = await response.json();
-
         } catch (apiError) {
-            console.error('❌ RAG API Error:', apiError);
-            return res.status(502).json({
+            console.error('⚠️ Initial RAG Chat Fetch Error:', apiError);
+            responseStatus = 500;
+        }
+
+        // If the RAG server returned a 404 (session not found on the remote server, likely due to a restart)
+        if (responseStatus === 404) {
+            console.warn(`⚠️ RAG Server returned 404 for session ${activeSessionId}. Re-initializing session on RAG server...`);
+            
+            let newSessionData = null;
+            try {
+                const sessionResponse = await fetch(`${RAG_BASE_URL}/sessions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: activeSessionId, // Send existing session_id to see if RAG accepts it
+                        case_id: parseInt(case_id),
+                        session_type: "clinical_chat",
+                        session_name: `Case ${case_id} Discussion`
+                    })
+                });
+                
+                if (sessionResponse.ok) {
+                    newSessionData = await sessionResponse.json();
+                } else {
+                    throw new Error(`Failed to re-initialize session. Status: ${sessionResponse.status}`);
+                }
+            } catch (sessionErr) {
+                console.error('❌ Failed to re-register session on RAG server:', sessionErr);
+            }
+
+            if (newSessionData && newSessionData.session_id) {
+                const newSessionId = newSessionData.session_id;
+                
+                // If RAG returned a new/different session_id, sync our local database mapping
+                if (newSessionId !== activeSessionId) {
+                    console.log(`🔄 Syncing local DB to new RAG session ID: ${newSessionId} (was: ${activeSessionId})`);
+                    try {
+                        // 1. Insert the new session row first
+                        await pool.query(
+                            `INSERT INTO chat_sessions (id, case_id, session_name, session_type) 
+                             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+                            [newSessionId, case_id, `Case ${case_id} Discussion`, 'clinical_chat']
+                        );
+                        
+                        // 2. Update user message we just saved to the new session ID
+                        await pool.query(
+                            `UPDATE chat_messages SET session_id = $1 WHERE id = $2`,
+                            [newSessionId, userMessage.id]
+                        );
+                        
+                        // 3. Update all previous messages in that old session as well
+                        await pool.query(
+                            `UPDATE chat_messages SET session_id = $1 WHERE session_id = $2`,
+                            [newSessionId, activeSessionId]
+                        );
+                        
+                        // 4. Delete the old session row
+                        await pool.query(
+                            `DELETE FROM chat_sessions WHERE id = $1`,
+                            [activeSessionId]
+                        );
+                        
+                        activeSessionId = newSessionId;
+                    } catch (dbSyncErr) {
+                        console.error('❌ Database sync failed during RAG session recreation:', dbSyncErr);
+                    }
+                }
+
+                // Retry the chat request with the newly active session ID!
+                console.log(`🔄 Retrying chat query with verified active session: ${activeSessionId}`);
+                try {
+                    const retryResponse = await fetch(`${RAG_BASE_URL}/chat`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            query: user_query,
+                            case_id: parseInt(case_id),
+                            session_id: activeSessionId,
+                            attached_xray_url: null,
+                            attached_pdf_url: null
+                        })
+                    });
+                    
+                    if (retryResponse.ok) {
+                        ragResponseData = await retryResponse.json();
+                        responseStatus = 200;
+                    } else {
+                        throw new Error(`RAG API returned status ${retryResponse.status} on retry`);
+                    }
+                } catch (retryErr) {
+                    console.error('❌ Retry chat query failed:', retryErr);
+                    responseStatus = 502;
+                }
+            }
+        }
+
+        // If it's still not ok, fail gracefully
+        if (responseStatus !== 200 || !ragResponseData) {
+            return res.status(responseStatus === 404 ? 502 : responseStatus).json({
                 success: false,
-                error: 'Failed to communicate with RAG API',
+                error: 'Failed to communicate with RAG API after auto-recovery attempts.',
                 user_message: userMessage
             });
         }
@@ -220,6 +318,7 @@ router.post('/query', verifyToken, async (req, res) => {
 
         res.status(200).json({
             success: true,
+            session_id: activeSessionId,
             user_message: userMessage,
             ai_message: aiMessage,
             rag_details: ragResponseData
