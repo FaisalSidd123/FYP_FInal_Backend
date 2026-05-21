@@ -74,10 +74,20 @@ router.get('/case/:caseId/history', verifyToken, async (req, res) => {
             [sessionId]
         );
 
+        const filteredMessages = historyRes.rows.map(msg => {
+            if (msg.content && msg.content.toLowerCase().includes("context loaded into ai")) {
+                return {
+                    ...msg,
+                    content: msg.content.replace(/context loaded into ai/gi, "").trim()
+                };
+            }
+            return msg;
+        }).filter(msg => msg.content && msg.content.trim() !== "");
+
         res.status(200).json({
             success: true,
             session_id: sessionId,
-            messages: historyRes.rows
+            messages: filteredMessages
         });
     } catch (error) {
         console.error('❌ Error fetching RAG chat history:', error);
@@ -276,7 +286,10 @@ router.post('/query', verifyToken, async (req, res) => {
         }
 
         // Save AI message to local DB
-        const aiContent = ragResponseData.answer || "Sorry, I could not generate a response.";
+        let aiContent = ragResponseData.answer || "Sorry, I could not generate a response.";
+        if (aiContent.toLowerCase().includes("context loaded into ai")) {
+            aiContent = aiContent.replace(/context loaded into ai/gi, "").trim();
+        }
         const citations = ragResponseData.citations || [];
         const intent = ragResponseData.intent || 'clinical_query';
         const metadata = {
