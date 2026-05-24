@@ -2,6 +2,14 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { verifyToken } = require('../middleware/authMiddleware');
+const multer = require('multer');
+const { uploadToCloudinary } = require('../cloudinary');
+
+const storage = multer.memoryStorage();
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 20 * 1024 * 1024 } // 20MB limit for PDFs and Images
+});
 
 const RAG_BASE_URL = process.env.RAG_BASE_URL || process.env.RAG_API_URL || 'https://clickless-aaliyah-maternally.ngrok-free.dev';
 
@@ -99,7 +107,7 @@ router.get('/case/:caseId/history', verifyToken, async (req, res) => {
 // POST /api/rag/query
 // Proxies query to FastAPI Clinical RAG v6 model and saves to local DB
 // ============================================
-router.post('/query', verifyToken, async (req, res) => {
+router.post('/query', verifyToken, upload.single('file'), async (req, res) => {
     try {
         const { case_id, user_query, session_id } = req.body;
 
@@ -152,8 +160,8 @@ router.post('/query', verifyToken, async (req, res) => {
         // Save USER message to local DB
         const insertUserMsg = await pool.query(
             `INSERT INTO chat_messages (case_id, session_id, role, message_type, content) 
-             VALUES ($1, $2, 'user', 'text', $3) RETURNING *`,
-            [case_id, activeSessionId, user_query]
+             VALUES ($1, $2, 'user', $3, $4) RETURNING *`,
+            [case_id, activeSessionId, req.file ? (req.file.mimetype === 'application/pdf' ? 'pdf' : 'image') : 'text', user_query]
         );
         const userMessage = insertUserMsg.rows[0];
 
@@ -162,6 +170,33 @@ router.post('/query', verifyToken, async (req, res) => {
         let ragResponseData = null;
         let responseStatus = 200;
         let response = null;
+        
+        let attached_xray_url = null;
+        let attached_pdf_url = null;
+
+        if (req.file) {
+            try {
+                console.log('☁️ Uploading attachment to Cloudinary...');
+                const isPdf = req.file.mimetype === 'application/pdf';
+                const resourceType = isPdf ? 'raw' : 'image';
+                
+                const cloudinaryResult = await uploadToCloudinary(req.file.buffer, {
+                    folder: 'rag_attachments',
+                    public_id: `attach_${case_id}_${Date.now()}`,
+                    resource_type: resourceType
+                });
+                
+                if (isPdf) {
+                    attached_pdf_url = cloudinaryResult.secure_url;
+                } else {
+                    attached_xray_url = cloudinaryResult.secure_url;
+                }
+                console.log(`☁️ Cloudinary upload success: ${cloudinaryResult.secure_url}`);
+            } catch (uploadError) {
+                console.error('❌ Cloudinary upload failed:', uploadError.message);
+                return res.status(500).json({ success: false, error: 'Failed to upload attachment' });
+            }
+        }
 
         try {
             response = await fetch(`${RAG_BASE_URL}/chat`, {
@@ -171,8 +206,8 @@ router.post('/query', verifyToken, async (req, res) => {
                     query: user_query,
                     case_id: parseInt(case_id),
                     session_id: activeSessionId,
-                    attached_xray_url: null,
-                    attached_pdf_url: null
+                    attached_xray_url: attached_xray_url,
+                    attached_pdf_url: attached_pdf_url
                 })
             });
             responseStatus = response.status;
@@ -258,8 +293,8 @@ router.post('/query', verifyToken, async (req, res) => {
                             query: user_query,
                             case_id: parseInt(case_id),
                             session_id: activeSessionId,
-                            attached_xray_url: null,
-                            attached_pdf_url: null
+                            attached_xray_url: attached_xray_url,
+                            attached_pdf_url: attached_pdf_url
                         })
                     });
                     
