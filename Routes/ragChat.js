@@ -157,13 +157,104 @@ router.post('/query', verifyToken, upload.single('file'), async (req, res) => {
             }
         }
 
-        // Save USER message to local DB
-        const insertUserMsg = await pool.query(
-            `INSERT INTO chat_messages (case_id, session_id, role, message_type, content) 
-             VALUES ($1, $2, 'user', $3, $4) RETURNING *`,
-            [case_id, activeSessionId, req.file ? (req.file.mimetype === 'application/pdf' ? 'pdf' : 'image') : 'text', user_query]
+        // Retrieve the last 2 messages from the session to identify duplicate/concurrent submissions
+        const lastMsgsRes = await pool.query(
+            `SELECT * FROM chat_messages 
+             WHERE session_id = $1 
+             ORDER BY created_at DESC LIMIT 2`,
+            [activeSessionId]
         );
-        const userMessage = insertUserMsg.rows[0];
+
+        let userMessage = null;
+
+        if (lastMsgsRes.rows.length > 0) {
+            const firstLast = lastMsgsRes.rows[0];
+            const secondLast = lastMsgsRes.rows[1];
+
+            // Scenario A: First query is still actively running in the background (no AI response written yet)
+            if (firstLast.role === 'user' && firstLast.content.trim() === user_query.trim()) {
+                console.warn('⚠️ Duplicate concurrent query detected (active RAG query running). Waiting for assistant response...');
+                
+                // Poll for the latest message in this session to become an assistant message
+                let aiMessage = null;
+                for (let i = 0; i < 60; i++) {
+                    const checkRes = await pool.query(
+                        `SELECT * FROM chat_messages 
+                         WHERE session_id = $1 
+                         ORDER BY created_at DESC LIMIT 1`,
+                        [activeSessionId]
+                    );
+                    if (checkRes.rows.length > 0 && checkRes.rows[0].role === 'assistant') {
+                        aiMessage = checkRes.rows[0];
+                        break;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+
+                if (aiMessage) {
+                    let metadataObj = {};
+                    try {
+                        metadataObj = typeof aiMessage.metadata === 'string' 
+                            ? JSON.parse(aiMessage.metadata) 
+                            : aiMessage.metadata;
+                    } catch(e) {}
+                    
+                    return res.status(200).json({
+                        success: true,
+                        session_id: activeSessionId,
+                        user_message: firstLast,
+                        ai_message: aiMessage,
+                        rag_details: {
+                            answer: aiMessage.content,
+                            citations: aiMessage.cited_documents || [],
+                            intent: aiMessage.intent || 'clinical_query',
+                            ...metadataObj
+                        }
+                    });
+                } else {
+                    console.log('⚠️ Wait for assistant response timed out. Proceeding to fetch from RAG using existing user message.');
+                    userMessage = firstLast;
+                }
+            }
+            // Scenario B: First query finished successfully, but duplicate request arrived late
+            else if (
+                firstLast.role === 'assistant' && 
+                secondLast && 
+                secondLast.role === 'user' && 
+                secondLast.content.trim() === user_query.trim()
+            ) {
+                console.warn('⚠️ Duplicate concurrent query detected (RAG response completed). Returning cached response.');
+                let metadataObj = {};
+                try {
+                    metadataObj = typeof firstLast.metadata === 'string' 
+                        ? JSON.parse(firstLast.metadata) 
+                        : firstLast.metadata;
+                } catch(e) {}
+
+                return res.status(200).json({
+                    success: true,
+                    session_id: activeSessionId,
+                    user_message: secondLast,
+                    ai_message: firstLast,
+                    rag_details: {
+                        answer: firstLast.content,
+                        citations: firstLast.cited_documents || [],
+                        intent: firstLast.intent || 'clinical_query',
+                        ...metadataObj
+                    }
+                });
+            }
+        }
+
+        if (!userMessage) {
+            // Save USER message to local DB
+            const insertUserMsg = await pool.query(
+                `INSERT INTO chat_messages (case_id, session_id, role, message_type, content) 
+                 VALUES ($1, $2, 'user', $3, $4) RETURNING *`,
+                [case_id, activeSessionId, req.file ? (req.file.mimetype === 'application/pdf' ? 'pdf' : 'image') : 'text', user_query]
+            );
+            userMessage = insertUserMsg.rows[0];
+        }
 
         // 🚀 Forward to Clinical RAG v6 API
         console.log(`Forwarding query to RAG v6 at ${RAG_BASE_URL}/chat`);
